@@ -2,24 +2,58 @@ const express = require("express")
 const multer = require("multer")
 const cors = require("cors")
 const path = require("path")
+const fs = require("fs")
+
+// ✅ fetch — Node 18+ এ built-in, নিচে হলে node-fetch
+let fetch = globalThis.fetch
+if (!fetch) {
+  fetch = require("node-fetch")
+}
 
 const app = express()
-app.use(cors())
+
+// ✅ Render/proxy এর জন্য trust proxy
+app.set("trust proxy", true)
+
+// ✅ CORS
+app.use(cors({
+  origin: [
+    "https://kittyis1.online",
+    "https://www.kittyis1.online",
+    "http://localhost:5500",
+    "http://127.0.0.1:5500"
+  ]
+}))
+
 app.use(express.json())
 
-// 🔥 TELEGRAM INFO (KEEP IN BACKEND ONLY)
-const BOT_TOKEN = "YOUR_BOT_TOKEN"
-const CHAT_ID = "YOUR_CHAT_ID"
+// ✅ uploads folder auto-create
+if (!fs.existsSync("uploads")) {
+  fs.mkdirSync("uploads")
+}
 
-// login memory (1 time send)
+// 🔥 SECRETS — env থেকে নেবে
+const BOT_TOKEN = process.env.BOT_TOKEN
+const CHAT_ID = process.env.CHAT_ID
+const ACCESS_KEY = process.env.ACCESS_KEY
+
+if (!BOT_TOKEN || !CHAT_ID || !ACCESS_KEY) {
+  console.error("❌ Missing BOT_TOKEN or CHAT_ID or ACCESS_KEY in environment variables")
+  process.exit(1)
+}
+
+const USERS = {
+  "katis1": "8822",
+  "kittyis0001": "9911"
+}
+
 let loggedUsers = {}
 
-// ✅ KEEP ALIVE ROUTE (IMPORTANT)
+// ✅ KEEP ALIVE
 app.get("/", (req, res) => {
   res.send("Server is alive 🚀")
 })
 
-// file storage
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
     cb(null, "uploads/")
@@ -31,60 +65,109 @@ const storage = multer.diskStorage({
 
 const upload = multer({ storage })
 
-// serve uploaded files
 app.use("/uploads", express.static("uploads"))
 
-// 📤 IMAGE UPLOAD API
+// 📤 IMAGE UPLOAD
 app.post("/upload", upload.single("file"), (req, res) => {
+  if (!req.file) {
+    return res.status(400).json({ error: "No file uploaded" })
+  }
   res.json({
     url: req.protocol + "://" + req.get("host") + "/uploads/" + req.file.filename
   })
 })
 
-// 🔐 LOGIN TRACK (Telegram send)
+// 🔑 ACCESS KEY CHECK
+app.post("/check-access", (req, res) => {
+  const { key } = req.body
+  res.json({ ok: key === ACCESS_KEY })
+})
+
+// 🔐 LOGIN CHECK + TELEGRAM NOTIFY
 app.post("/login", async (req, res) => {
-  const { username } = req.body
+  const { username, password, battery } = req.body
 
-  if (!username) return res.sendStatus(400)
+  if (!username || !password) return res.sendStatus(400)
 
-  if (loggedUsers[username]) {
-    return res.json({ status: "already_sent" })
+  if (!USERS[username] || USERS[username] !== password) {
+    return res.json({ ok: false })
   }
 
+  // ✅ আগে response পাঠাও
+  res.json({ ok: true })
+
+  if (loggedUsers[username]) return
   loggedUsers[username] = true
 
-  const ip = req.headers["x-forwarded-for"] || req.socket.remoteAddress
-  const userAgent = req.headers["user-agent"]
+  // ✅ trust proxy true থাকায় এটা এখন reliable
+  let ip = req.headers["x-forwarded-for"] || req.socket.remoteAddress || ""
+  ip = ip.split(",")[0].trim()
+
+  const userAgent = req.headers["user-agent"] || ""
 
   let device = "Unknown"
   if (userAgent.includes("Android")) device = "Android"
   else if (userAgent.includes("iPhone")) device = "iPhone"
   else device = "PC"
 
-  const msg = `
-👤 New Login
-Username: ${username}
-Device: ${device}
-IP: ${ip}
-`
+  let isp = "Unknown"
+  let location = "Unknown"
+  try {
+    const geo = await fetch(`https://ipapi.co/${ip}/json/`)
+    const geoData = await geo.json()
+    isp = geoData.org || "Unknown"
+    location = `${geoData.city || "?"}, ${geoData.country_name || "?"}`
+  } catch(e) {
+    console.error("Geo API error:", e.message)
+  }
+
+  const now = new Date()
+  const time = now.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+
+  const msg = `🔐 New Login
+👤 Username: ${username}
+📱 Device: ${device}
+🌐 IP: ${ip}
+📍 Location: ${location}
+🏢 ISP: ${isp}
+🔋 Battery: ${battery || "Unknown"}
+🕒 Time: ${time}`
 
   try {
     await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        chat_id: CHAT_ID,
-        text: msg
-      })
+      body: JSON.stringify({ chat_id: CHAT_ID, text: msg })
     })
-  } catch (e) {}
-
-  res.json({ status: "sent" })
+  } catch(e) {
+    console.error("Telegram login notify error:", e.message)
+  }
 })
 
-// 🔥 PORT FIX (RENDER READY)
-const PORT = process.env.PORT || 3000
+// 💬 TELEGRAM MESSAGE NOTIFY
+app.post("/notify", async (req, res) => {
+  const { text, time } = req.body
+  if (!text) return res.sendStatus(400)
 
+  const msg = `💬 Kitty:
+${text}
+
+🕒 Today at ${time}`
+
+  try {
+    await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ chat_id: CHAT_ID, text: msg })
+    })
+  } catch(e) {
+    console.error("Telegram notify error:", e.message)
+  }
+
+  res.json({ ok: true })
+})
+
+const PORT = process.env.PORT || 3000
 app.listen(PORT, () => {
   console.log("Server running 🚀")
 })
