@@ -7,12 +7,17 @@ const app = express()
 app.use(cors())
 app.use(express.json())
 
-// 🔥 YOUR TELEGRAM INFO
-const BOT_TOKEN = "8706773948:AAGEEWhwYeP2e44k73DBFzQrEaFi5lGZj1c"
-const CHAT_ID = "8782681794"
+// 🔥 TELEGRAM INFO (KEEP IN BACKEND ONLY)
+const BOT_TOKEN = "YOUR_BOT_TOKEN"
+const CHAT_ID = "YOUR_CHAT_ID"
 
 // login memory (1 time send)
 let loggedUsers = {}
+
+// ✅ KEEP ALIVE ROUTE (IMPORTANT)
+app.get("/", (req, res) => {
+  res.send("Server is alive 🚀")
+})
 
 // file storage
 const storage = multer.diskStorage({
@@ -29,7 +34,7 @@ const upload = multer({ storage })
 // serve uploaded files
 app.use("/uploads", express.static("uploads"))
 
-// 📤 IMAGE UPLOAD API (FIXED)
+// 📤 IMAGE UPLOAD API
 app.post("/upload", upload.single("file"), (req, res) => {
   res.json({
     url: req.protocol + "://" + req.get("host") + "/uploads/" + req.file.filename
@@ -63,28 +68,23 @@ Device: ${device}
 IP: ${ip}
 `
 
-  await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      chat_id: CHAT_ID,
-      text: msg
+  try {
+    await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        chat_id: CHAT_ID,
+        text: msg
+      })
     })
-  })
+  } catch (e) {}
 
   res.json({ status: "sent" })
 })
 
-// 🎤 VOICE UPLOAD (FIXED)
-app.post("/voice", upload.single("file"), (req, res) => {
-  res.json({
-    url: req.protocol + "://" + req.get("host") + "/uploads/" + req.file.filename
-  })
-})
-
-// 🔥 PORT FIX (IMPORTANT FOR RENDER)
+// 🔥 PORT FIX (RENDER READY)
 const PORT = process.env.PORT || 3000
 
 app.listen(PORT, () => {
-  console.log("Server running")
+  console.log("Server running 🚀")
 })
