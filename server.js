@@ -4,7 +4,6 @@ const cors = require("cors")
 const path = require("path")
 const fs = require("fs")
 
-// ✅ fetch — Node 18+ এ built-in, নিচে হলে node-fetch
 let fetch = globalThis.fetch
 if (!fetch) {
   fetch = require("node-fetch")
@@ -12,10 +11,8 @@ if (!fetch) {
 
 const app = express()
 
-// ✅ Render/proxy এর জন্য trust proxy
 app.set("trust proxy", true)
 
-// ✅ CORS
 app.use(cors({
   origin: [
     "https://kittyis1.online",
@@ -27,12 +24,10 @@ app.use(cors({
 
 app.use(express.json())
 
-// ✅ uploads folder auto-create
 if (!fs.existsSync("uploads")) {
   fs.mkdirSync("uploads")
 }
 
-// 🔥 SECRETS — env থেকে নেবে
 const BOT_TOKEN = process.env.BOT_TOKEN
 const CHAT_ID = process.env.CHAT_ID
 const ACCESS_KEY = process.env.ACCESS_KEY
@@ -47,9 +42,6 @@ const USERS = {
   "kittyis0001": "9911"
 }
 
-let loggedUsers = {}
-
-// ✅ KEEP ALIVE
 app.get("/", (req, res) => {
   res.send("Server is alive 🚀")
 })
@@ -67,7 +59,6 @@ const upload = multer({ storage })
 
 app.use("/uploads", express.static("uploads"))
 
-// 📤 IMAGE UPLOAD
 app.post("/upload", upload.single("file"), (req, res) => {
   if (!req.file) {
     return res.status(400).json({ error: "No file uploaded" })
@@ -77,13 +68,11 @@ app.post("/upload", upload.single("file"), (req, res) => {
   })
 })
 
-// 🔑 ACCESS KEY CHECK
 app.post("/check-access", (req, res) => {
   const { key } = req.body
   res.json({ ok: key === ACCESS_KEY })
 })
 
-// 🔐 LOGIN CHECK + TELEGRAM NOTIFY
 app.post("/login", async (req, res) => {
   const { username, password, battery } = req.body
 
@@ -93,13 +82,8 @@ app.post("/login", async (req, res) => {
     return res.json({ ok: false })
   }
 
-  // ✅ আগে response পাঠাও
   res.json({ ok: true })
 
-  if (loggedUsers[username]) return
-  loggedUsers[username] = true
-
-  // ✅ trust proxy true থাকায় এটা এখন reliable
   let ip = req.headers["x-forwarded-for"] || req.socket.remoteAddress || ""
   ip = ip.split(",")[0].trim()
 
@@ -113,10 +97,12 @@ app.post("/login", async (req, res) => {
   let isp = "Unknown"
   let location = "Unknown"
   try {
-    const geo = await fetch(`https://ipapi.co/${ip}/json/`)
+    const geo = await fetch(`https://ipwho.is/${ip}`)
     const geoData = await geo.json()
-    isp = geoData.org || "Unknown"
-    location = `${geoData.city || "?"}, ${geoData.country_name || "?"}`
+    if (geoData.success) {
+      isp = geoData.connection?.isp || "Unknown"
+      location = `${geoData.city || "?"}, ${geoData.country || "?"}`
+    }
   } catch(e) {
     console.error("Geo API error:", e.message)
   }
@@ -144,7 +130,6 @@ app.post("/login", async (req, res) => {
   }
 })
 
-// 💬 TELEGRAM MESSAGE NOTIFY
 app.post("/notify", async (req, res) => {
   const { text, time } = req.body
   if (!text) return res.sendStatus(400)
