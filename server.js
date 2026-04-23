@@ -1,13 +1,12 @@
 const express = require("express")
-const multer = require("multer")
 const cors = require("cors")
-const path = require("path")
+const multer = require("multer")
+const cloudinary = require("cloudinary").v2
+const streamifier = require("streamifier")
 const fs = require("fs")
 
 let fetch = globalThis.fetch
-if (!fetch) {
-  fetch = require("node-fetch")
-}
+if (!fetch) fetch = require("node-fetch")
 
 const app = express()
 
@@ -24,16 +23,25 @@ app.use(cors({
 
 app.use(express.json())
 
-if (!fs.existsSync("uploads")) {
-  fs.mkdirSync("uploads")
-}
+// ✅ Cloudinary config
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key: process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET
+})
 
+// ✅ Secrets
 const BOT_TOKEN = process.env.BOT_TOKEN
 const CHAT_ID = process.env.CHAT_ID
 const ACCESS_KEY = process.env.ACCESS_KEY
 
 if (!BOT_TOKEN || !CHAT_ID || !ACCESS_KEY) {
-  console.error("❌ Missing BOT_TOKEN or CHAT_ID or ACCESS_KEY in environment variables")
+  console.error("❌ Missing environment variables")
+  process.exit(1)
+}
+
+if (!process.env.CLOUDINARY_CLOUD_NAME || !process.env.CLOUDINARY_API_KEY || !process.env.CLOUDINARY_API_SECRET) {
+  console.error("❌ Missing Cloudinary environment variables")
   process.exit(1)
 }
 
@@ -42,45 +50,65 @@ const USERS = {
   "kittyis0001": "9911"
 }
 
+// ✅ multer — memory storage (Cloudinary তে যাবে)
+const upload = multer({ storage: multer.memoryStorage() })
+
 app.get("/", (req, res) => {
   res.send("Server is alive 🚀")
 })
 
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    cb(null, "uploads/")
-  },
-  filename: (req, file, cb) => {
-    cb(null, Date.now() + path.extname(file.originalname))
-  }
-})
-
-const upload = multer({ storage })
-
-app.use("/uploads", express.static("uploads"))
-
-app.post("/upload", upload.single("file"), (req, res) => {
-  if (!req.file) {
-    return res.status(400).json({ error: "No file uploaded" })
-  }
-  res.json({
-    url: req.protocol + "://" + req.get("host") + "/uploads/" + req.file.filename
+// ✅ Cloudinary upload helper
+function uploadToCloudinary(buffer, options) {
+  return new Promise((resolve, reject) => {
+    const stream = cloudinary.uploader.upload_stream(options, (error, result) => {
+      if (error) reject(error)
+      else resolve(result)
+    })
+    streamifier.createReadStream(buffer).pipe(stream)
   })
+}
+
+// 📤 IMAGE UPLOAD → Cloudinary
+app.post("/upload", upload.single("file"), async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: "No file uploaded" })
+  try {
+    const result = await uploadToCloudinary(req.file.buffer, {
+      folder: "chat/images",
+      resource_type: "image"
+    })
+    res.json({ url: result.secure_url })
+  } catch(e) {
+    console.error("Image upload error:", e.message)
+    res.status(500).json({ error: "Upload failed" })
+  }
 })
 
+// 🎤 VOICE UPLOAD → Cloudinary
+app.post("/voice", upload.single("file"), async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: "No file uploaded" })
+  try {
+    const result = await uploadToCloudinary(req.file.buffer, {
+      folder: "chat/voices",
+      resource_type: "video" // Cloudinary audio = video resource type
+    })
+    res.json({ url: result.secure_url })
+  } catch(e) {
+    console.error("Voice upload error:", e.message)
+    res.status(500).json({ error: "Upload failed" })
+  }
+})
+
+// 🔑 ACCESS KEY CHECK
 app.post("/check-access", (req, res) => {
   const { key } = req.body
   res.json({ ok: key === ACCESS_KEY })
 })
 
+// 🔐 LOGIN CHECK + TELEGRAM NOTIFY
 app.post("/login", async (req, res) => {
   const { username, password, battery } = req.body
-
   if (!username || !password) return res.sendStatus(400)
-
-  if (!USERS[username] || USERS[username] !== password) {
-    return res.json({ ok: false })
-  }
+  if (!USERS[username] || USERS[username] !== password) return res.json({ ok: false })
 
   res.json({ ok: true })
 
@@ -88,7 +116,6 @@ app.post("/login", async (req, res) => {
   ip = ip.split(",")[0].trim()
 
   const userAgent = req.headers["user-agent"] || ""
-
   let device = "Unknown"
   if (userAgent.includes("Android")) device = "Android"
   else if (userAgent.includes("iPhone")) device = "iPhone"
@@ -130,14 +157,12 @@ app.post("/login", async (req, res) => {
   }
 })
 
+// 💬 TELEGRAM MESSAGE NOTIFY
 app.post("/notify", async (req, res) => {
   const { text, time } = req.body
   if (!text) return res.sendStatus(400)
 
-  const msg = `💬 Kitty:
-${text}
-
-🕒 Today at ${time}`
+  const msg = `💬 Kitty:\n${text}\n\n🕒 Today at ${time}`
 
   try {
     await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
@@ -153,6 +178,4 @@ ${text}
 })
 
 const PORT = process.env.PORT || 3000
-app.listen(PORT, () => {
-  console.log("Server running 🚀")
-})
+app.listen(PORT, () => console.log("Server running 🚀"))
