@@ -176,6 +176,30 @@ app.post("/notify", async (req, res) => {
 
   res.json({ ok: true })
 })
+const fs = require("fs")
 
+let memory = []
+
+if(fs.existsSync("memory.json")){
+
+   memory = JSON.parse(fs.readFileSync("memory.json"))
+
+}
+
+function saveMemory(sender, text){
+
+   memory.push({
+
+      sender,
+
+      text,
+
+      time: Date.now()
+
+   })
+
+   fs.writeFileSync("memory.json", JSON.stringify(memory, null, 2))
+
+}
 const PORT = process.env.PORT || 3000
 app.listen(PORT, () => console.log("Server running 🚀"))
