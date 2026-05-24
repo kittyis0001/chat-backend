@@ -4,6 +4,7 @@ const multer = require("multer")
 const cloudinary = require("cloudinary").v2
 const streamifier = require("streamifier")
 const fs = require("fs")
+const uploadRoute = require("./routes/upload")
 
 let fetch = globalThis.fetch
 if (!fetch) fetch = require("node-fetch")
@@ -23,6 +24,9 @@ app.use(cors({
 
 app.use(express.json())
 
+// ✅ Upload Route
+app.use("/upload", uploadRoute)
+
 // ✅ Cloudinary config
 cloudinary.config({
   cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
@@ -40,7 +44,11 @@ if (!BOT_TOKEN || !CHAT_ID || !ACCESS_KEY) {
   process.exit(1)
 }
 
-if (!process.env.CLOUDINARY_CLOUD_NAME || !process.env.CLOUDINARY_API_KEY || !process.env.CLOUDINARY_API_SECRET) {
+if (
+  !process.env.CLOUDINARY_CLOUD_NAME ||
+  !process.env.CLOUDINARY_API_KEY ||
+  !process.env.CLOUDINARY_API_SECRET
+) {
   console.error("❌ Missing Cloudinary environment variables")
   process.exit(1)
 }
@@ -50,8 +58,13 @@ const USERS = {
   "kittyis0001": "9911"
 }
 
-// ✅ multer — memory storage (Cloudinary তে যাবে)
-const upload = multer({ storage: multer.memoryStorage() })
+// ✅ multer — memory storage
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: 50 * 1024 * 1024
+  }
+})
 
 app.get("/", (req, res) => {
   res.send("Server is alive 🚀")
@@ -60,82 +73,146 @@ app.get("/", (req, res) => {
 // ✅ Cloudinary upload helper
 function uploadToCloudinary(buffer, options) {
   return new Promise((resolve, reject) => {
-    const stream = cloudinary.uploader.upload_stream(options, (error, result) => {
-      if (error) reject(error)
-      else resolve(result)
-    })
+    const stream = cloudinary.uploader.upload_stream(
+      options,
+      (error, result) => {
+        if (error) reject(error)
+        else resolve(result)
+      }
+    )
+
     streamifier.createReadStream(buffer).pipe(stream)
   })
 }
 
 // 📤 IMAGE UPLOAD → Cloudinary
-app.post("/upload", upload.single("file"), async (req, res) => {
-  if (!req.file) return res.status(400).json({ error: "No file uploaded" })
+app.post("/image", upload.single("file"), async (req, res) => {
+  if (!req.file) {
+    return res.status(400).json({
+      error: "No file uploaded"
+    })
+  }
+
   try {
     const result = await uploadToCloudinary(req.file.buffer, {
       folder: "chat/images",
       resource_type: "image"
     })
-    res.json({ url: result.secure_url })
-  } catch(e) {
+
+    res.json({
+      success: true,
+      url: result.secure_url
+    })
+
+  } catch (e) {
     console.error("Image upload error:", e.message)
-    res.status(500).json({ error: "Upload failed" })
+
+    res.status(500).json({
+      success: false,
+      error: "Upload failed"
+    })
   }
 })
 
 // 🎤 VOICE UPLOAD → Cloudinary
 app.post("/voice", upload.single("file"), async (req, res) => {
-  if (!req.file) return res.status(400).json({ error: "No file uploaded" })
+  if (!req.file) {
+    return res.status(400).json({
+      error: "No file uploaded"
+    })
+  }
+
   try {
     const result = await uploadToCloudinary(req.file.buffer, {
       folder: "chat/voices",
-      resource_type: "video" // Cloudinary audio = video resource type
+      resource_type: "video"
     })
-    res.json({ url: result.secure_url })
-  } catch(e) {
+
+    res.json({
+      success: true,
+      url: result.secure_url
+    })
+
+  } catch (e) {
     console.error("Voice upload error:", e.message)
-    res.status(500).json({ error: "Upload failed" })
+
+    res.status(500).json({
+      success: false,
+      error: "Upload failed"
+    })
   }
 })
 
 // 🔑 ACCESS KEY CHECK
 app.post("/check-access", (req, res) => {
   const { key } = req.body
-  res.json({ ok: key === ACCESS_KEY })
+
+  res.json({
+    ok: key === ACCESS_KEY
+  })
 })
 
 // 🔐 LOGIN CHECK + TELEGRAM NOTIFY
 app.post("/login", async (req, res) => {
+
   const { username, password, battery } = req.body
-  if (!username || !password) return res.sendStatus(400)
-  if (!USERS[username] || USERS[username] !== password) return res.json({ ok: false })
 
-  res.json({ ok: true })
+  if (!username || !password) {
+    return res.sendStatus(400)
+  }
 
-  let ip = req.headers["x-forwarded-for"] || req.socket.remoteAddress || ""
+  if (!USERS[username] || USERS[username] !== password) {
+    return res.json({
+      ok: false
+    })
+  }
+
+  res.json({
+    ok: true
+  })
+
+  let ip =
+    req.headers["x-forwarded-for"] ||
+    req.socket.remoteAddress ||
+    ""
+
   ip = ip.split(",")[0].trim()
 
   const userAgent = req.headers["user-agent"] || ""
+
   let device = "Unknown"
-  if (userAgent.includes("Android")) device = "Android"
-  else if (userAgent.includes("iPhone")) device = "iPhone"
-  else device = "PC"
+
+  if (userAgent.includes("Android")) {
+    device = "Android"
+  } else if (userAgent.includes("iPhone")) {
+    device = "iPhone"
+  } else {
+    device = "PC"
+  }
 
   let isp = "Unknown"
   let location = "Unknown"
+
   try {
+
     const geo = await fetch(`https://ipwho.is/${ip}`)
     const geoData = await geo.json()
+
     if (geoData.success) {
       isp = geoData.connection?.isp || "Unknown"
       location = `${geoData.city || "?"}, ${geoData.country || "?"}`
     }
-  } catch(e) {
+
+  } catch (e) {
     console.error("Geo API error:", e.message)
   }
 
   const now = new Date()
-  const time = now.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+
+  const time = now.toLocaleTimeString([], {
+    hour: "2-digit",
+    minute: "2-digit"
+  })
 
   const msg = `🔐 New Login
 👤 Username: ${username}
@@ -147,35 +224,60 @@ app.post("/login", async (req, res) => {
 🕒 Time: ${time}`
 
   try {
+
     await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ chat_id: CHAT_ID, text: msg })
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        chat_id: CHAT_ID,
+        text: msg
+      })
     })
-  } catch(e) {
+
+  } catch (e) {
     console.error("Telegram login notify error:", e.message)
   }
+
 })
 
 // 💬 TELEGRAM MESSAGE NOTIFY
 app.post("/notify", async (req, res) => {
+
   const { text, time } = req.body
-  if (!text) return res.sendStatus(400)
+
+  if (!text) {
+    return res.sendStatus(400)
+  }
 
   const msg = `💬 Kitty:\n${text}\n\n🕒 Today at ${time}`
 
   try {
+
     await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ chat_id: CHAT_ID, text: msg })
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        chat_id: CHAT_ID,
+        text: msg
+      })
     })
-  } catch(e) {
+
+  } catch (e) {
     console.error("Telegram notify error:", e.message)
   }
 
-  res.json({ ok: true })
+  res.json({
+    ok: true
+  })
+
 })
 
 const PORT = process.env.PORT || 3000
-app.listen(PORT, () => console.log("Server running 🚀"))
+
+app.listen(PORT, () => {
+  console.log("Server running 🚀")
+})
