@@ -57,7 +57,6 @@ Only return the JSON. No explanation.`
     const data = await res.json()
     const raw  = data?.candidates?.[0]?.content?.parts?.[0]?.text || ''
 
-    // JSON parse — remove markdown fences if any
     const cleaned = raw.replace(/```json|```/g, '').trim()
     const parsed  = JSON.parse(cleaned)
 
@@ -78,6 +77,9 @@ async function analyzeMoodFromImage(imageUrl = '', caption = '') {
     return analyzeMoodFromCaption(caption)
   }
 
+  // DEBUG 1: log imageUrl
+  console.log('[MusicMood] imageUrl:', imageUrl)
+
   const prompt = `You are a music mood analyzer.
 
 Look at this story image${caption ? ` with caption: "${caption}"` : ''}.
@@ -95,9 +97,20 @@ Only return JSON. No markdown. No explanation.`
 
   try {
     // fetch image as base64
-    const imgRes  = await fetch(imageUrl)
+    const imgRes = await fetch(imageUrl)
+
+    // DEBUG 2: log HTTP status
+    console.log('[MusicMood] image status:', imgRes.status)
+
+    // DEBUG 3: log content-type
+    console.log('[MusicMood] content-type:', imgRes.headers.get('content-type'))
+
     const imgBuf  = await imgRes.arrayBuffer()
-    const b64     = Buffer.from(imgBuf).toString('base64')
+
+    // DEBUG 4: log image size
+    console.log('[MusicMood] image size:', imgBuf.byteLength)
+
+    const b64      = Buffer.from(imgBuf).toString('base64')
     const mimeType = imgRes.headers.get('content-type') || 'image/jpeg'
 
     const res = await fetch(
@@ -116,7 +129,14 @@ Only return JSON. No markdown. No explanation.`
         })
       }
     )
-    const data    = await res.json()
+    const data = await res.json()
+
+    // DEBUG 6: log full Gemini response if error field present
+    if (data.error || !data.candidates) {
+      console.log('[MusicMood] Gemini API error response:')
+      console.log(JSON.stringify(data, null, 2))
+    }
+
     const raw     = data?.candidates?.[0]?.content?.parts?.[0]?.text || ''
     const cleaned = raw.replace(/```json|```/g, '').trim()
     const parsed  = JSON.parse(cleaned)
@@ -125,7 +145,8 @@ Only return JSON. No markdown. No explanation.`
     throw new Error('Invalid')
 
   } catch (e) {
-    console.error('[MusicMood] Gemini vision error:', e.message)
+    // DEBUG 5: log full error object
+    console.error('[MusicMood] Full Error:', e)
     // fallback to caption analysis
     return analyzeMoodFromCaption(caption)
   }
