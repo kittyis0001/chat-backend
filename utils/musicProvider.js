@@ -29,24 +29,62 @@ async function searchYouTube(query, maxResults = 10) {
   }
 }
 
+// UPDATE 1: Global trending queries — Instagram/TikTok style
+const GLOBAL_TRENDING_QUERIES = [
+  'The Weeknd new song 2024',
+  'Billie Eilish latest hit',
+  'Taylor Swift trending',
+  'Dua Lipa popular song',
+  'Sabrina Carpenter viral',
+  'Benson Boone beautiful things',
+  'Ariana Grande trending 2024',
+  'Drake popular song',
+  'Travis Scott viral',
+  'Doja Cat trending',
+  'Ed Sheeran latest',
+  'Shakira viral song'
+]
+
 // ── YouTube Trending Music ────────────────────────────────
-async function getTrendingYouTube(regionCode = 'BD', maxResults = 20) {
+async function getTrendingYouTube(regionCode = 'US', maxResults = 20) {
   if (!YT_API_KEY) return []
   try {
-    const url = `https://www.googleapis.com/youtube/v3/videos?part=snippet&chart=mostPopular&videoCategoryId=10&regionCode=${regionCode}&maxResults=${maxResults}&key=${YT_API_KEY}`
-    const res  = await fetch(url)
-    const data = await res.json()
-    if (!data.items) return []
-    return data.items.map(item => ({
-      videoId:   item.id,
-      title:     item.snippet.title,
-      artist:    item.snippet.channelTitle,
-      thumbnail: item.snippet.thumbnails?.medium?.url || '',
-      source:    'youtube'
-    }))
+    // Try mostPopular chart first (US region = global)
+    const chartUrl = `https://www.googleapis.com/youtube/v3/videos?part=snippet&chart=mostPopular&videoCategoryId=10&regionCode=US&maxResults=${maxResults}&key=${YT_API_KEY}`
+    const chartRes  = await fetch(chartUrl)
+    const chartData = await chartRes.json()
+
+    let results = []
+    if (chartData.items && chartData.items.length > 0) {
+      results = chartData.items.map(item => ({
+        videoId:   item.id,
+        title:     item.snippet.title,
+        artist:    item.snippet.channelTitle,
+        thumbnail: item.snippet.thumbnails?.medium?.url || '',
+        source:    'youtube'
+      }))
+    }
+
+    // If chart insufficient, supplement with global artist searches
+    if (results.length < 8) {
+      const picks = GLOBAL_TRENDING_QUERIES.slice(0, 6)
+      for (const q of picks) {
+        const r = await searchYouTube(q, 2)
+        results = [...results, ...r]
+        if (results.length >= maxResults) break
+      }
+    }
+
+    return results.slice(0, maxResults)
   } catch (e) {
     console.error('[Music] YouTube trending error:', e.message)
-    return []
+    // Fallback: search global artists
+    const fallback = []
+    for (const q of GLOBAL_TRENDING_QUERIES.slice(0, 5)) {
+      const r = await searchYouTube(q, 3)
+      fallback.push(...r)
+    }
+    return fallback.slice(0, maxResults)
   }
 }
 
