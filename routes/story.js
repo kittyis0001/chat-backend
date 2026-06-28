@@ -20,7 +20,7 @@ function saveStories(data) {
 
 // ✅ CREATE STORY
 router.post("/create", (req, res) => {
-  const { userId, type, media, caption, music, edit } = req.body
+  const { userId, type, media, caption, music } = req.body
 
   if (!userId || !type || !media) {
     return res.status(400).json({
@@ -38,7 +38,6 @@ router.post("/create", (req, res) => {
     media,
     caption: caption || "",
     music: music || null,
-    edit: edit || null,   // ✅ video overlay edit data (filter/text/sticker/draw)
     createdAt: Date.now(),
     expiresAt: Date.now() + 86400000  // 24 ঘণ্টা
   }
