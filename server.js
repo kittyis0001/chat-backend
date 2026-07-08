@@ -8,6 +8,7 @@ const fs = require("fs")
 const uploadRoute = require("./routes/upload")
 const storyRoute  = require("./routes/story")
 const musicRoute  = require("./routes/music")   // ✅ NEW
+const aiRoute     = require("./routes/ai")      // ✅ NEW — Telegram-style AI editor
 
 let fetch = globalThis.fetch
 if (!fetch) fetch = require("node-fetch")
@@ -31,6 +32,7 @@ app.use(express.json({ limit: '10mb' }))   // ✅ increased for image base64
 app.use("/upload",  uploadRoute)
 app.use("/stories", storyRoute)
 app.use("/music",   musicRoute)             // ✅ NEW
+app.use("/ai",      aiRoute)                // ✅ NEW — Telegram-style AI editor
 
 // ✅ Cloudinary config
 cloudinary.config({
