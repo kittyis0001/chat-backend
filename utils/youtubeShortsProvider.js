@@ -4,25 +4,33 @@
 // Every function here is wrapped with shortsCache.cached() so the
 // same quota-expensive call is never repeated within its TTL window.
 //
-// IMPORTANT — two YouTube API facts this file works around:
+// IMPORTANT — API facts this file works around:
 //
-// 1. search.list's `relatedToVideoId` parameter was deprecated by
-//    YouTube in June 2023 and no longer works. There is no direct
-//    "give me related videos" endpoint anymore. getRelatedShorts()
-//    below reconstructs "related" by pulling the source video's own
-//    tags/category/channel (1 cheap videos.list call) and using
-//    those as search terms — the closest working equivalent.
+// 1. search.list's `relatedToVideoId` was deprecated June 2023 and
+//    no longer works — getRelatedShorts() reconstructs "related"
+//    from the source video's own tags/channel instead.
 //
-// 2. videos.list's `chart=mostPopular` was narrowed by YouTube in
-//    July 2025 to only return Trending Music / Movies / Gaming — it
-//    no longer reflects general trending content. getTrendingShorts()
-//    below does NOT rely on that chart; it uses search.list with a
-//    recency + view-count bias instead, which is more quota-expensive
-//    (100 units vs 1) but is the only way to get genuinely general
-//    trending Shorts today. This is exactly why the background-job
-//    caching layer (shortsBackgroundJobs.js) matters so much — this
-//    expensive call should only run a few times per hour, server-side,
-//    never once per user request.
+// 2. videos.list's `chart=mostPopular` was narrowed July 2025 to only
+//    return Trending Music/Movies/Gaming — getTrendingShorts() uses
+//    search.list with a recency + view-count bias instead.
+//
+// 3. YouTube's Data API has NO hard "exclude this country's content"
+//    or "video is in English" filter. `relevanceLanguage` only hints
+//    the ranking, it doesn't strictly filter. This file combines
+//    relevanceLanguage + regionCode + a title-script heuristic +
+//    defaultAudioLanguage check as a best-effort multi-layer filter —
+//    this reduces non-English/Indian-region content significantly
+//    but cannot guarantee zero false positives, since YouTube simply
+//    doesn't expose a field for "this creator/video is Indian."
+//
+// 4. "Same shorts every login" fix: the trending pool is now built
+//    from topic hashtag CLUSTERS (see HASHTAG_CLUSTERS below) merged
+//    together, cached as a larger pool, and — critically — SHUFFLED
+//    on every serve (not just every cache refresh). Two logins five
+//    minutes apart now see a different order/slice of the pool even
+//    though the underlying cached data hasn't changed yet, which is
+//    what was actually missing before (the old version cached and
+//    returned one fixed, deterministically-ordered list).
 // ═══════════════════════════════════════════════════════════
 
 const cache = require('./shortsCache')
@@ -34,19 +42,15 @@ const YT_API_KEY = process.env.YOUTUBE_API_KEY
 const YT_BASE     = 'https://www.googleapis.com/youtube/v3'
 
 // A Short is currently defined by YouTube as up to 3 minutes long
-// (raised from the original 60s limit in an October 2024 policy
-// update). Kept as a single constant so it's a one-line change if
-// YouTube's definition shifts again.
+// (raised from the original 60s limit, October 2024 policy update).
 const MAX_SHORT_DURATION_SECONDS = 180
 
-// ── TTLs — tuned so the background job (every 45-60 min) is the
-// main quota consumer, not individual user requests. ──
 const TTL = {
-  TRENDING: 60 * 60 * 1000,       // 1 hour — refreshed by background job anyway
-  SEARCH:   20 * 60 * 1000,       // 20 min — repeated identical searches are free within this window
-  CHANNEL:  60 * 60 * 1000,       // 1 hour — channel uploads don't change minute to minute
-  RELATED:  6  * 60 * 60 * 1000,  // 6 hours — relatedness doesn't need to be fresh
-  VIDEO_META: 6 * 60 * 60 * 1000  // 6 hours — per-video duration/snippet lookups
+  TRENDING: 60 * 60 * 1000,       // 1 hour — pool refresh; variety comes from shuffle-on-serve, not this
+  SEARCH:   20 * 60 * 1000,
+  CHANNEL:  60 * 60 * 1000,
+  RELATED:  6  * 60 * 60 * 1000,
+  VIDEO_META: 6 * 60 * 60 * 1000
 }
 
 function isConfigured() {
@@ -64,6 +68,38 @@ function parseIsoDuration(iso) {
   return h * 3600 + min * 60 + s
 }
 
+// ── Best-effort "is this likely English / non-Indian" check ──
+// See file header note #3 — this is a heuristic layer, not a
+// guarantee, because YouTube's API doesn't expose a hard filter.
+const INDIC_SCRIPT_RANGES = [
+  [0x0900, 0x097F], // Devanagari (Hindi, Marathi, etc.)
+  [0x0980, 0x09FF], // Bengali
+  [0x0A00, 0x0A7F], // Gurmukhi (Punjabi)
+  [0x0A80, 0x0AFF], // Gujarati
+  [0x0B00, 0x0B7F], // Oriya
+  [0x0B80, 0x0BFF], // Tamil
+  [0x0C00, 0x0C7F], // Telugu
+  [0x0C80, 0x0CFF], // Kannada
+  [0x0D00, 0x0D7F]  // Malayalam
+]
+function containsIndicScript(text) {
+  if (!text) return false
+  for (const ch of text) {
+    const code = ch.codePointAt(0)
+    for (const [start, end] of INDIC_SCRIPT_RANGES) {
+      if (code >= start && code <= end) return true
+    }
+  }
+  return false
+}
+function looksEnglish(video) {
+  const title = video.title || ''
+  if (containsIndicScript(title)) return false
+  const lang = (video.defaultAudioLanguage || video.defaultLanguage || '').toLowerCase()
+  if (lang && !lang.startsWith('en')) return false
+  return true
+}
+
 function mapVideoResource(item) {
   const duration = parseIsoDuration(item.contentDetails?.duration)
   return {
@@ -75,16 +111,14 @@ function mapVideoResource(item) {
     publishedAt:  item.snippet?.publishedAt || '',
     tags:         item.snippet?.tags || [],
     categoryId:   item.snippet?.categoryId || '',
+    defaultAudioLanguage: item.snippet?.defaultAudioLanguage || '',
+    defaultLanguage:      item.snippet?.defaultLanguage || '',
     durationSeconds: duration,
     viewCount:    parseInt(item.statistics?.viewCount || '0', 10),
     likeCount:    parseInt(item.statistics?.likeCount || '0', 10)
   }
 }
 
-// ── Batch videos.list lookup (cheap — 1 unit per call regardless of
-// how many of the up-to-50 IDs are requested) — used both to filter
-// search results down to actual Shorts-length videos, and to fetch
-// a single video's metadata for the "related" feature. ──
 async function fetchVideoDetails(videoIds) {
   if (!videoIds.length || !isConfigured()) return []
   const key = 'videometa:' + videoIds.slice().sort().join(',')
@@ -102,15 +136,14 @@ async function fetchVideoDetails(videoIds) {
   })
 }
 
-// ── Runs a search.list query, then hard-filters the results down to
-// actual Shorts-length videos via one batched videos.list call. ──
 async function searchAndFilterToShorts(params, limit = 20) {
   if (!isConfigured()) return []
   try {
     const qs = new URLSearchParams({
       part: 'snippet',
       type: 'video',
-      maxResults: String(Math.min(limit * 2, 50)),  // over-fetch since some will be filtered out by duration
+      maxResults: String(Math.min(limit * 3, 50)),  // over-fetch — duration + language filtering both remove items
+      relevanceLanguage: 'en',
       key: YT_API_KEY,
       ...params
     })
@@ -124,6 +157,7 @@ async function searchAndFilterToShorts(params, limit = 20) {
     const details = await fetchVideoDetails(ids)
     return details
       .filter(v => v.durationSeconds > 0 && v.durationSeconds <= MAX_SHORT_DURATION_SECONDS)
+      .filter(looksEnglish)
       .slice(0, limit)
   } catch (e) {
     console.error('[Shorts] searchAndFilterToShorts error:', e.message)
@@ -131,32 +165,100 @@ async function searchAndFilterToShorts(params, limit = 20) {
   }
 }
 
-// ── TRENDING ───────────────────────────────────────────────
-// No working "official trending" endpoint for general Shorts (see
-// file header) — approximated via recent + high-view-count search.
-const TRENDING_QUERY_BY_CATEGORY = {
-  all:     '#shorts',
-  comedy:  '#shorts comedy funny',
-  music:   '#shorts music',
-  gaming:  '#shorts gaming',
-  sports:  '#shorts sports',
-  cooking: '#shorts recipe cooking',
-  dance:   '#shorts dance'
+// ── Fisher-Yates shuffle — used to give repeat visits variety even
+// when serving from the same cached pool (see file header note #4). ──
+function shuffle(arr) {
+  const a = arr.slice()
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1))
+    ;[a[i], a[j]] = [a[j], a[i]]
+  }
+  return a
 }
 
-async function getTrendingShorts(category = 'all', regionCode = 'US') {
-  const cacheKey = `trending:${category}:${regionCode}`
-  return cache.cached(cacheKey, TTL.TRENDING, async () => {
-    const q = TRENDING_QUERY_BY_CATEGORY[category] || TRENDING_QUERY_BY_CATEGORY.all
-    const publishedAfter = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString()  // last 7 days
-    return searchAndFilterToShorts({
-      q,
-      order: 'viewCount',
-      regionCode,
-      publishedAfter,
-      videoDuration: 'short'   // YouTube's own <4min filter, cheap first pass before our own stricter check
-    }, 20)
+// ── HASHTAG CLUSTERS ───────────────────────────────────────
+// Built from the exact hashtag list provided, deduped and grouped
+// into thematically-related sets. Each cluster becomes ONE search
+// query (a few representative tags combined), not one query per tag
+// — 70+ individual tag searches would cost 70×100=7000+ quota units
+// per refresh cycle, which isn't sustainable. Grouping into ~6
+// clusters keeps this to a handful of search.list calls per cycle
+// while still covering the full requested topic range over time
+// (see shortsBackgroundJobs.js's rotation).
+const HASHTAG_CLUSTERS = {
+  romance_books: {
+    label: 'Romance & Books',
+    query: 'booktok spicy darkromance love shorts',
+    tags: ['spicy','darkromance','books','booktok','love','delulu','deluluisthesolulu']
+  },
+  anime_manga: {
+    label: 'Anime & Manga',
+    query: 'anime manga manhwa webtoon shorts',
+    tags: ['anime','manga','animelove','loveanddeepspace','manhwa','webtoon','comic','cartoon','berserk',
+           'animeedit','sylus','ksmalicsi','i_am_your_guardian_angel','웹툰','whenthesilentbirdsings']
+  },
+  cats: {
+    label: 'Cats',
+    query: 'cat kitten cute funny shorts',
+    tags: ['cat','cats','kitten','kittens','meow','kitty','catlover','catlovers','catlife','catstory','cutestory',
+           'catsofyoutube','cutecat','cutekitten','funnycats','funnycatvideos','catvideos','catvideo','fluffycat',
+           'adorablecats','catcontent','catfunnyvideos']
+  },
+  ai_content: {
+    label: 'AI Shorts',
+    query: 'ai generated aivideo aishorts shorts',
+    tags: ['aivideo','ai','aishorts','aistory']
+  },
+  kpop: {
+    label: 'K-pop',
+    query: 'kpop bts rumi shorts',
+    tags: ['rumi','rumistory','rumishorts','kpop','kpopedit','kpopfunny','bts','sehar']
+  },
+  general_viral: {
+    label: 'Trending',
+    query: 'viral trending fyp relatable funny shorts',
+    tags: ['aesthetic','funny','trending','viral','fyp','relatable','memes','meme','art','digitalart','pov',
+           'shortsfeed','funnyvideo','story','oc']
+  }
+}
+const CLUSTER_KEYS = Object.keys(HASHTAG_CLUSTERS)
+
+// ── TRENDING ───────────────────────────────────────────────
+// Builds a pool from one or more hashtag clusters, caches the pool,
+// and returns a SHUFFLED slice on every call — see file header #4
+// for why this matters (fixes "same shorts every login").
+async function getTrendingShorts(clusterKey = 'all', regionCode = 'US', excludeVideoIds = []) {
+  const clusters = clusterKey === 'all' ? CLUSTER_KEYS : [clusterKey].filter(k => HASHTAG_CLUSTERS[k])
+  const cacheKey = `trendingpool:${clusters.join(',')}:${regionCode}`
+
+  const pool = await cache.cached(cacheKey, TTL.TRENDING, async () => {
+    const publishedAfter = new Date(Date.now() - 10 * 24 * 60 * 60 * 1000).toISOString()  // last 10 days
+    let combined = []
+    for (const key of clusters) {
+      const cluster = HASHTAG_CLUSTERS[key]
+      const results = await searchAndFilterToShorts({
+        q: cluster.query,
+        order: 'viewCount',
+        regionCode,
+        publishedAfter,
+        videoDuration: 'short'
+      }, 15)
+      results.forEach(v => { v.cluster = key })
+      combined.push(...results)
+    }
+    // De-dupe across clusters (a video could match more than one)
+    const seen = new Set()
+    combined = combined.filter(v => {
+      if (seen.has(v.videoId)) return false
+      seen.add(v.videoId)
+      return true
+    })
+    return combined
   })
+
+  const excludeSet = new Set(excludeVideoIds)
+  const filtered = pool.filter(v => !excludeSet.has(v.videoId))
+  return shuffle(filtered.length >= 10 ? filtered : pool).slice(0, 25)
 }
 
 // ── SEARCH ─────────────────────────────────────────────────
@@ -165,7 +267,7 @@ async function searchShorts(query, pageToken = '') {
   const cacheKey = `search:${query.toLowerCase()}:${pageToken}`
   return cache.cached(cacheKey, TTL.SEARCH, async () => {
     return searchAndFilterToShorts({
-      q: `${query} #shorts`,
+      q: `${query} shorts`,
       order: 'relevance',
       videoDuration: 'short',
       ...(pageToken ? { pageToken } : {})
@@ -187,7 +289,7 @@ async function getChannelShorts(channelId, pageToken = '') {
   })
 }
 
-// ── RELATED SHORTS (relatedToVideoId replacement — see header) ──
+// ── RELATED SHORTS (relatedToVideoId replacement) ──────────
 async function getRelatedShorts(videoId) {
   if (!videoId) return []
   const cacheKey = `related:${videoId}`
@@ -195,16 +297,13 @@ async function getRelatedShorts(videoId) {
     const [source] = await fetchVideoDetails([videoId])
     if (!source) return []
 
-    // Pull from the same channel first (cheapest, most reliably
-    // "related" in spirit), then top up with a tag-based search if
-    // that channel doesn't have enough other Shorts.
     let results = await getChannelShorts(source.channelId)
     results = results.filter(v => v.videoId !== videoId)
 
     if (results.length < 10 && source.tags.length) {
       const tagQuery = source.tags.slice(0, 3).join(' ')
       const tagResults = await searchAndFilterToShorts({
-        q: `${tagQuery} #shorts`,
+        q: `${tagQuery} shorts`,
         order: 'relevance',
         videoDuration: 'short'
       }, 20)
@@ -222,27 +321,22 @@ async function getRelatedShorts(videoId) {
 }
 
 // ── RECOMMENDED SHORTS ─────────────────────────────────────
-// No official YouTube "recommendations" endpoint is exposed by the
-// Data API — this is a lightweight, rule-based blend built from the
-// user's own signals (not machine-learned), combining:
-//   - tags/categories from their recent watch history + likes/saves
-//   - the shared trending pool as a fallback/filler
-async function getRecommendedShorts(interestTags = [], fallbackCategory = 'all') {
-  const cacheKey = `recommended:${interestTags.slice().sort().join(',')}:${fallbackCategory}`
+async function getRecommendedShorts(interestTags = [], fallbackCluster = 'all') {
+  const cacheKey = `recommended:${interestTags.slice().sort().join(',')}:${fallbackCluster}`
   return cache.cached(cacheKey, TTL.SEARCH, async () => {
     let results = []
 
     if (interestTags.length) {
       const tagQuery = interestTags.slice(0, 4).join(' ')
       results = await searchAndFilterToShorts({
-        q: `${tagQuery} #shorts`,
+        q: `${tagQuery} shorts`,
         order: 'relevance',
         videoDuration: 'short'
       }, 15)
     }
 
     if (results.length < 10) {
-      const trending = await getTrendingShorts(fallbackCategory)
+      const trending = await getTrendingShorts(fallbackCluster)
       const existingIds = new Set(results.map(v => v.videoId))
       for (const v of trending) {
         if (!existingIds.has(v.videoId)) {
@@ -252,7 +346,7 @@ async function getRecommendedShorts(interestTags = [], fallbackCategory = 'all')
       }
     }
 
-    return results.slice(0, 20)
+    return shuffle(results).slice(0, 20)
   })
 }
 
@@ -266,5 +360,7 @@ module.exports = {
   getChannelShorts,
   getRelatedShorts,
   getRecommendedShorts,
-  TRENDING_QUERY_BY_CATEGORY
-}
+  HASHTAG_CLUSTERS,
+  CLUSTER_KEYS
+        }
+  
