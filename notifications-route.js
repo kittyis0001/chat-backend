@@ -23,6 +23,17 @@
 const admin = require("firebase-admin")
 const express = require("express")
 
+const ALLOWED_ORIGINS = ["https://kittyis1.online", "https://www.kittyis1.online"]
+
+function setCorsHeaders(req, res) {
+  const origin = req.headers.origin
+  if (ALLOWED_ORIGINS.includes(origin)) {
+    res.setHeader("Access-Control-Allow-Origin", origin)
+  }
+  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS")
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type")
+}
+
 let adminApp = null
 function getAdminApp() {
   if (adminApp) return adminApp
@@ -38,7 +49,15 @@ function getAdminApp() {
 }
 
 module.exports = function attachNotificationRoute(app) {
+  // Preflight — browsers send this before the real POST because the
+  // request has a JSON body + custom content-type.
+  app.options("/send-notification", (req, res) => {
+    setCorsHeaders(req, res)
+    res.sendStatus(204)
+  })
+
   app.post("/send-notification", express.json(), async (req, res) => {
+    setCorsHeaders(req, res)
     try {
       const { toUser, fromUser, fromNick, avatar, type, preview, replyPreview, msgKey } = req.body || {}
       if (!toUser || !fromUser) {
