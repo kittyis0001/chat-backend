@@ -50,8 +50,15 @@ module.exports = function attachNotificationRoute(app) {
 
       // Skip the push entirely if the recipient already has this chat
       // open and focused right now — they'll see the message live.
+      // Uses a heartbeat (active + last-updated timestamp) instead of a
+      // plain boolean: if the flag is older than 20s it's treated as
+      // stale/not-active, so a missed "went to background" event can
+      // never permanently block notifications.
       const activeSnap = await db.ref("activeViewers/" + toUser).once("value")
-      if (activeSnap.val() === true) {
+      const activeVal = activeSnap.val()
+      const isRecipientActive =
+        activeVal && activeVal.active === true && (Date.now() - (activeVal.last || 0)) < 20000
+      if (isRecipientActive) {
         return res.json({ ok: true, skipped: "recipient active" })
       }
 
@@ -61,6 +68,7 @@ module.exports = function attachNotificationRoute(app) {
       const tokens = deviceIds.map((id) => tokensObj[id] && tokensObj[id].token).filter(Boolean)
 
       if (!tokens.length) {
+        console.log(`[notify] no FCM tokens stored for ${toUser} — nothing to send`)
         return res.json({ ok: true, skipped: "no tokens" })
       }
 
@@ -100,6 +108,7 @@ module.exports = function attachNotificationRoute(app) {
       }
 
       res.json({ ok: true, sent: response.successCount, failed: response.failureCount })
+      console.log(`[notify] to=${toUser} tokens=${tokens.length} sent=${response.successCount} failed=${response.failureCount}`)
     } catch (e) {
       console.error("send-notification error:", e)
       res.status(500).json({ ok: false, error: "internal error" })
