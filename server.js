@@ -16,9 +16,12 @@ const { startShortsBackgroundJobs } = require("./utils/shortsBackgroundJobs")
 let fetch = globalThis.fetch
 if (!fetch) fetch = require("node-fetch")
 
-const app = express()
+const app = express();
 
-app.set("trust proxy", true)
+const attachNotificationRoute = require("./notifications-route");
+attachNotificationRoute(app);
+
+app.set("trust proxy", true);
 
 app.use(cors({
   origin: [
