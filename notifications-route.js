@@ -34,6 +34,25 @@ function setCorsHeaders(req, res) {
   res.setHeader("Access-Control-Allow-Headers", "Content-Type")
 }
 
+// Loud startup check — so a missing/broken credential shows up in the
+// Render deploy log immediately, instead of only surfacing as a silent
+// 500 the first time someone sends a message.
+if (!process.env.FIREBASE_SERVICE_ACCOUNT) {
+  console.error("❌ [notify] FIREBASE_SERVICE_ACCOUNT env var is NOT set — push notifications will fail on every send.")
+} else {
+  try {
+    JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT)
+    console.log("✅ [notify] FIREBASE_SERVICE_ACCOUNT is set and parses as valid JSON.")
+  } catch (e) {
+    console.error("❌ [notify] FIREBASE_SERVICE_ACCOUNT is set but is NOT valid JSON:", e.message)
+  }
+}
+if (!process.env.FIREBASE_DB_URL) {
+  console.error("❌ [notify] FIREBASE_DB_URL env var is NOT set — push notifications will fail on every send.")
+} else {
+  console.log("✅ [notify] FIREBASE_DB_URL =", process.env.FIREBASE_DB_URL)
+}
+
 let adminApp = null
 function getAdminApp() {
   if (adminApp) return adminApp
@@ -133,4 +152,5 @@ module.exports = function attachNotificationRoute(app) {
       res.status(500).json({ ok: false, error: "internal error" })
     }
   })
-}
+                                     }
+        
