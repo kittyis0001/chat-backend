@@ -18,9 +18,6 @@ if (!fetch) fetch = require("node-fetch")
 
 const app = express();
 
-const attachNotificationRoute = require("./notifications-route");
-attachNotificationRoute(app);
-
 app.set("trust proxy", true);
 
 app.use(cors({
@@ -33,6 +30,10 @@ app.use(cors({
 }))
 
 app.use(express.json({ limit: '10mb' }))   // ✅ increased for image base64
+
+// ✅ Push notifications — after cors + json so it shares them
+const attachNotificationRoute = require("./notifications-route");
+attachNotificationRoute(app);
 
 // ✅ Routes
 app.use("/upload",  uploadRoute)
