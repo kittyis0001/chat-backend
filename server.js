@@ -149,8 +149,10 @@ app.post("/login", async (req, res) => {
 })
 
 app.post("/notify", async (req, res) => {
-  const { text, time } = req.body
+  const { text, time, fromUser } = req.body
   if (!text) return res.sendStatus(400)
+
+  if (fromUser !== "kittyis0001") return res.json({ ok: true, skipped: "sender filtered" })
 
   const msg = `💬 Kitty:\n${text}\n\n🕒 Today at ${time}`
   try {
